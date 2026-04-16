@@ -1,5 +1,5 @@
 [package]
-name = "checkpoint"
+name = "checkpointrs"
 version = "0.1.0"
 authors = ["Tris Oaten"]
 description = "TODO"
