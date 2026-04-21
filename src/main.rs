@@ -1,12 +1,14 @@
 #![expect(clippy::as_conversions)]
-
+#![expect(unused)]
+#![allow(clippy::missing_const_for_fn)]
 use crate::eyre::eyre;
 use clap::Parser;
 use color_eyre::Section;
 use color_eyre::eyre::{self, Result};
 use colored::{ColoredString, Colorize};
-use command_run::Command;
+use command_run::{Command, Error, Output};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
+use std::env::args;
 use std::{ffi::OsStr, fs, sync::mpsc::Receiver, time::Duration};
 use std::{path::Path, sync::mpsc};
 
@@ -23,40 +25,78 @@ struct Cli {
 
 /// State diagram:
 /// ```mermaid
+/// flowchart LR
 /// PASSING-->|fail|FAILING
 /// FAILING-->|pass; git commit|PASSING
 /// ```
 /// Other transitions are no-ops (such as tests passing while in passing state)
-struct SavePoint<State> {
-    #[expect(unused)]
+#[derive(Debug, Copy, Clone)]
+struct SavePoint<'a> {
+    program: &'a str,
+    args: &'a [String],
     state: State,
 }
-struct Passing;
-struct Failing;
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum State {
+    Passing,
+    Failing,
+}
+#[allow(clippy::enum_glob_use)]
+use State::*;
 
-impl SavePoint<Passing> {
-    const fn new() -> Self {
-        Self { state: Passing }
+impl<'a> SavePoint<'a> {
+    /// If error file exists, failing, if not, passing
+    fn new(program: &'a str, args: &'a [String]) -> Self {
+        let state = match fs::exists(ERRFILE) {
+            Ok(_) => Passing,
+            Err(_) => Failing,
+        };
+        Self {
+            program,
+            args,
+            state,
+        }
     }
-    #[expect(clippy::unused_self)]
-    const fn test(self) -> SavePoint<Failing> {
-        SavePoint { state: Failing }
+
+    /// main state dispatcher
+    fn test(mut self) -> Result<Self> {
+        let res = cmdr(self.program, self.args);
+
+        match (&self, res) {
+            // noop
+            (Self { state: Passing, .. }, Ok(_)) | (Self { state: Failing, .. }, Err(_)) => {
+                Ok(self)
+            }
+            // notify, transition to failing
+            (Self { state: Passing, .. }, Err(_)) => Ok(self.fail()),
+            // notify, git commit
+            (Self { state: Failing, .. }, Ok(_)) => self.pass(),
+        }
+    }
+
+    /// fixed all errors, git commit
+    fn pass(self) -> Result<Self> {
+        log(&"Autosaving!".green().bold());
+        commit("SAVEPOINT REACHED!")?;
+        rm_errfile()?;
+        Ok(Self {
+            state: Passing,
+            ..self
+        })
+    }
+
+    /// test just failed
+    fn fail(self) -> Self {
+        log(&"Error!".red().bold());
+        let _ = create_errfile();
+        Self {
+            state: Failing,
+            ..self
+        }
     }
 }
 
-impl SavePoint<Failing> {
-    #[expect(clippy::unused_self)]
-    const fn test(self) -> SavePoint<Passing> {
-        SavePoint::<Passing> { state: Passing }
-    }
-}
-
-#[expect(unused)]
-const fn test_it() {
-    let machine = SavePoint::new();
-    let machine = machine.test().test();
-}
-
+/// Clear ansi terminal and put cursor at top-left
 fn clear() {
     print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
 }
@@ -67,6 +107,13 @@ fn log(message: &ColoredString) {
     println!("{message}");
 }
 
+#[expect(clippy::result_large_err)]
+fn cmdr(program: &str, args: &[String]) -> Result<Output, Error> {
+    log(&"Running command...".white().bold());
+    let mut command = Command::with_args(program, args);
+    command.log_command = false;
+    command.run()
+}
 fn main() -> Result<()> {
     // INFO: Setup
     color_eyre::install()?;
@@ -82,30 +129,13 @@ fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
     let mut watcher = notify::recommended_watcher(tx)?;
     watcher.watch(Path::new("."), RecursiveMode::Recursive)?;
+    let mut machine = SavePoint::new(program, args);
     //INFO: Main UI Loop
     loop {
-        clear(); //TODO: whereshould this go?
-        log(&"Running command...".white().bold());
-        let mut command = Command::with_args(program, args);
-        command.log_command = false;
-        let output = command.run();
-        if output.is_err() {
-            //INFO: ERROR
-            log(&"Error!".red().bold());
-            create_errfile()?;
-        } else {
-            //INFO: NO ERROR
-            if fs::exists(ERRFILE)? {
-                log(&"Autosaving!".green().bold());
-                #[allow(clippy::expect_used)]
-                commit("CHECKPOINT SAVED!")?;
-                rm_errfile()?;
-            } else {
-                log(&"OK".green().bold());
-            }
-        }
+        machine = machine.test()?;
         log(&"Monitoring...".white().bold());
         blockforfile(&rx, &extension);
+        clear();
     }
 }
 fn blockforfile(rx: &Receiver<Result<Event, notify::Error>>, extension: &str) {
