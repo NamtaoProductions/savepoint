@@ -21,6 +21,42 @@ struct Cli {
     name: Vec<String>,
 }
 
+/// State diagram:
+/// ```mermaid
+/// PASSING-->|fail|FAILING
+/// FAILING-->|pass; git commit|PASSING
+/// ```
+/// Other transitions are no-ops (such as tests passing while in passing state)
+struct SavePoint<State> {
+    #[expect(unused)]
+    state: State,
+}
+struct Passing;
+struct Failing;
+
+impl SavePoint<Passing> {
+    const fn new() -> Self {
+        Self { state: Passing }
+    }
+    #[expect(clippy::unused_self)]
+    const fn test(self) -> SavePoint<Failing> {
+        SavePoint { state: Failing }
+    }
+}
+
+impl SavePoint<Failing> {
+    #[expect(clippy::unused_self)]
+    const fn test(self) -> SavePoint<Passing> {
+        SavePoint::<Passing> { state: Passing }
+    }
+}
+
+#[expect(unused)]
+const fn test_it() {
+    let machine = SavePoint::new();
+    let machine = machine.test().test();
+}
+
 fn clear() {
     print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
 }
