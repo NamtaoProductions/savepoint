@@ -6,6 +6,23 @@ _A command watcher that commits when you fix errors_
 
 Feel free to poke around the [code](https://github.com/NamtaoProductions/savepoint/tree/main/), I would love [feature suggestions](https://github.com/NamtaoProductions/savepoint/issues/new/choose)!
 
+# Usage
+
+```shell
+Usage: savepoint [OPTIONS] --filetype <filetype> [COMMAND]...
+
+Arguments:
+  [COMMAND]...  Command to run (use after -- if your shell requires it)
+
+Options:
+  -f, --filetype <filetype>  Filename extension to watch (eg rs, js, py, java)
+  -d, --dryrun               Don't run git commit when tests pass
+  -c, --clear                Clear screen between exections
+  -q, --quiet                Don't display test output
+  -h, --help                 Print help
+  -V, --version              Print version
+```
+
 # DEMO
 
 ```shell
