@@ -8,6 +8,7 @@ use color_eyre::eyre::{self, Result};
 use colored::{ColoredString, Colorize};
 use command_run::{Command, Error, Output};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
+use spinners::{Spinner, Spinners};
 use std::env::args;
 use std::{ffi::OsStr, fs, sync::mpsc::Receiver, time::Duration};
 use std::{path::Path, sync::mpsc};
@@ -17,10 +18,20 @@ static ERRFILE: &str = ".checkpoint.error";
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    /// Filename extension to watch
+    /// Filename extension to watch (eg rs, js, py, java)
     #[arg(short, long, value_name = "filetype")]
     filetype: String,
-    name: Vec<String>,
+    /// Command to run (use after -- if your shell requires it)
+    command: Vec<String>,
+    /// Don't run git commit when tests pass
+    #[arg(short, long)]
+    dryrun: bool,
+    /// Clear screen between exections
+    #[arg(short, long)]
+    clear: bool,
+    /// Don't display test output
+    #[arg(short, long)]
+    quiet: bool,
 }
 
 /// State diagram:
@@ -44,6 +55,7 @@ enum State {
 #[allow(clippy::enum_glob_use)]
 use State::*;
 
+//TODO: All flags should get saved into self in new()
 impl<'a> SavePoint<'a> {
     /// If error file exists, failing, if not, passing
     fn new(program: &'a str, args: &'a [String]) -> Self {
@@ -59,25 +71,28 @@ impl<'a> SavePoint<'a> {
     }
 
     /// main state dispatcher
-    fn test(mut self) -> Result<Self> {
-        let res = cmdr(self.program, self.args);
-
+    fn test(mut self, program: &str, dryrun: bool, quiet: bool) -> Result<Self> {
+        let res = if quiet {
+            let mut sp = Spinner::new(Spinners::Line, format!("Running {program}..."));
+            let res = cmdr(self.program, self.args, quiet);
+            sp.stop();
+            res
+        } else {
+            cmdr(self.program, self.args, quiet)
+        };
+        println!("done!");
         match (&self, res) {
             // noop
-            (Self { state: Passing, .. }, Ok(_)) | (Self { state: Failing, .. }, Err(_)) => {
-                Ok(self)
-            }
-            // notify, transition to failing
-            (Self { state: Passing, .. }, Err(_)) => Ok(self.fail()),
+            (Self { state: Passing, .. }, Ok(_)) => Ok(self),
+            (Self { state: Failing, .. } | Self { state: Passing, .. }, Err(_)) => Ok(self.fail()),
             // notify, git commit
-            (Self { state: Failing, .. }, Ok(_)) => self.pass(),
+            (Self { state: Failing, .. }, Ok(_)) => self.pass(dryrun),
         }
     }
 
     /// fixed all errors, git commit
-    fn pass(self) -> Result<Self> {
-        log(&"Autosaving!".green().bold());
-        commit("SAVEPOINT REACHED!")?;
+    fn pass(self, dryrun: bool) -> Result<Self> {
+        commit("SAVEPOINT REACHED!", dryrun)?;
         rm_errfile()?;
         Ok(Self {
             state: Passing,
@@ -108,22 +123,32 @@ fn log(message: &ColoredString) {
 }
 
 #[expect(clippy::result_large_err)]
-fn cmdr(program: &str, args: &[String]) -> Result<Output, Error> {
-    log(&"Running command...".white().bold());
+fn cmdr(program: &str, args: &[String], quiet: bool) -> Result<Output, Error> {
     let mut command = Command::with_args(program, args);
+    if quiet {
+        let command = command.enable_capture();
+        command.combine_output = true;
+    }
     command.log_command = false;
     command.run()
 }
+#[allow(clippy::panic_in_result_fn)]
+#[allow(clippy::panic)]
 fn main() -> Result<()> {
     // INFO: Setup
     color_eyre::install()?;
     let cli = Cli::parse();
+    let dryrun = cli.dryrun;
+    let quiet = cli.quiet;
     let extension = cli.filetype;
     let program = cli
-        .name
+        .command
         .first()
         .ok_or_else(|| eyre!("Missing argument: COMMAND"))?;
-    let args = cli.name.get(1..).ok_or_else(|| eyre!("no program arg"))?;
+    let args = cli
+        .command
+        .get(1..)
+        .ok_or_else(|| eyre!("no program arg"))?;
 
     //INFO: File Watcher
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
@@ -132,10 +157,12 @@ fn main() -> Result<()> {
     let mut machine = SavePoint::new(program, args);
     //INFO: Main UI Loop
     loop {
-        machine = machine.test()?;
         log(&"Monitoring...".white().bold());
+        machine = machine.test(program, dryrun, quiet)?;
         blockforfile(&rx, &extension);
-        clear();
+        if cli.clear {
+            clear();
+        }
     }
 }
 fn blockforfile(rx: &Receiver<Result<Event, notify::Error>>, extension: &str) {
@@ -158,7 +185,12 @@ fn blockforfile(rx: &Receiver<Result<Event, notify::Error>>, extension: &str) {
     }
 }
 
-fn commit(msg: &str) -> Result<()> {
+fn commit(msg: &str, dryrun: bool) -> Result<()> {
+    if dryrun {
+        log(&"(dry run) Autosaving!".green().bold());
+        return Ok(());
+    }
+    log(&"Autosaving!".green().bold());
     let mut command = Command::with_args("git", ["commit", "-am", msg]);
     command.log_command = false;
     if command.run().is_ok() {
